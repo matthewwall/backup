@@ -1,0 +1,31 @@
+#!/usr/bin/perl
+# logwatch script to process backup log files
+# Copyright 2018 Matthew Wall
+
+use strict;
+
+my %counts;
+my %errors;
+
+my @logoutput = ();
+
+while(defined($_ = <STDIN>)) {
+    chomp;
+    push @logoutput, $_;
+}
+
+report("log output", \@logoutput) if $#logoutput >= 0;
+
+exit 0;
+
+sub report {
+    my($label, $aref, $href) = @_;
+    print "\n$label:\n";
+    foreach my $x (@$aref) {
+        my $str = $x;
+        if ($href && $href->{$x} > 1) {
+            $str .= " ($href->{$x} times)";
+        }
+        print "  $str\n";
+    }
+}

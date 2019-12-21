@@ -1,0 +1,2 @@
+upser ALL=NOPASSWD:/bin/rsync
+Defaults:bupuser !requiretty

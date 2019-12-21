@@ -1,0 +1,25 @@
+# default values for backup script
+
+#BACKUP_CFG_DIR=/opt/backup/etc/backup
+#BACKUP_USE_REMOTE_SUDO=
+#BACKUP_KEYFILE=
+#BACKUP_POOL=backup
+#BACKUP_USER=bup
+#BACKUP_SRC_DIR=/
+#BACKUP_DST_DIR=/backup
+
+#BACKUP_TPORT=2222
+#BACKUP_TUSER=backup
+#BACKUP_THOST=gateway
+
+#BACKUP_MAX_AGE=2592000
+
+#DATE=date
+#ECHO=echo
+#HOSTNAME=hostname
+#MKDIR=mkdir
+#RM=rm
+#RSYNC=rsync
+#SSH=ssh
+#TOUCH=touch
+#ZFS=zfs

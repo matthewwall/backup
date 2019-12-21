@@ -1,0 +1,100 @@
+rsync/zfs backup script
+
+This is a tool for backing up remote machines to a single server.  The server
+runs the backup.sh script periodically.  The server must have ssh access to
+each target machine, typically via a non-root user account.  That user account
+must have sudo rights on the rsync command on the target machine.
+
+Each time the backup script runs in does an rsync from the target to the
+server, followed by a zfs snapshot of the result.
+
+Data from each target goes into a separate zfs dataset.
+
+The default server layout is:
+
+/backup         - zfs pool
+/backup/target1 - zfs dataset for target1
+/backup/target2 - zfs dataset for target2
+
+Each snapshot has the form:
+
+backup/targetN@YYmmddHHMMSS
+
+
+Installation on the backup server
+
+yum install kernel-devel zfs rsync
+
+mkdir /etc/backup
+cp id_rsa_bup* /etc/backup
+chmod 600 /etc/backup/id_rsa_bup
+
+echo > /etc/default/backup <<EoF
+BACKUP_CFG_DIR=/etc/backup
+BACKUP_KEYFILE=/etc/backup/id_rsa_bup
+BACKUP_POOL=backup
+BACKUP_USER=bup
+BACKUP_SRC_DIR=/
+BACKUP_DST_DIR=/backup
+EoF
+
+mkdir /var/log/backup
+cp etc/cron.d/backup /etc/cron.d
+cp etc/logrotate.d/backup /etc/logrotate.d
+
+
+Installation on each backup target
+
+sudo yum install rsync
+
+sudo adduser bup
+
+echo 'bup ALL=NOPASSWD:/bin/rsync' | sudo tee /etc/sudoers.d/bup
+echo 'Defaults:bup !requiretty' | sudo tee -a /etc/suders.d/bup
+sudo chmod 440 /etc/sudoers.d/bup
+
+sudo usermod -a -G ssh-users bup
+
+mkdir /home/bup/.ssh
+echo "ssh-rsa xxx" > /home/bup/.ssh/authorized_keys
+chmod 700 /home/bup/.ssh
+chmod 600 /home/bup/.ssh/authorized_keys
+chown -R bup.bup /home/bup/.ssh
+
+
+Accept target keys on the server
+
+ssh -i /etc/backup/id_rsa_bup bup@target
+
+
+Do a single snapshot
+
+backup.sh single target
+
+
+Delete snapshots for target that are older than one week
+
+reap.sh target 604800
+
+
+Caveats
+
+The backup script uses the following binaries:
+
+DATE=date
+ECHO=echo
+HOSTNAME=hostname
+MKDIR=mkdir
+RM=rm
+RSYNC=rsync
+SSH=ssh
+TOUCH=touch
+ZFS=zfs
+
+If any of these are not in the default path of the user who runs the backup
+script, override the path using /etc/default/backup.  For example,
+
+ZFS=/sbin/zfs
+
+will work on CentOS7 systems where the root crontabs do not include /sbin
+in the path.

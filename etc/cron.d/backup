@@ -1,0 +1,11 @@
+# do daily backups every night at 23:00
+0 23 * * * root /opt/backup/bin/backup.sh daily >> /var/log/backup/daily.log 2>&1
+
+# delete snapshots
+0 1 * * * root /opt/backup/bin/reap.sh >> /var/log/backup/reap.log 2>&1
+
+# do monthly scrubs
+0 0 1 * * root /sbin/zpool scrub backup >> /var/log/backup/scrub.log 2>&1
+
+# report status once each day
+50 23 * * * root /opt/backup/bin/report.pl | mail -s "backup status for `hostname` `date +'%Y.%m.%d'`"

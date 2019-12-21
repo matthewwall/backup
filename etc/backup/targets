@@ -1,0 +1,20 @@
+# list of hosts that should be backed up
+#
+# one target per line, each line with the following format:
+# [user@]host [src_dir] [dst_dir]
+#
+# defaults:
+# src_dir=/
+# dst_dir=/backup/host
+
+# individual filesystems from single host
+#root@fs /mnt/vol/sw
+#root@fs /mnt/vol/ptdata
+#root@fs /mnt/vol/xray
+
+# all filesystems from each host
+#countess
+#tessgit
+#tessellate
+#koi368
+#fitsh
