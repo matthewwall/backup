@@ -1,17 +1,17 @@
 #!/usr/bin/perl
 # rsync-based rolling backup onto zfs
-# Copyright 2006-2020 Matthew Wall, all rights reserved
+# Copyright 2006-2021 Matthew Wall, all rights reserved
 #
 # usage:
 #
-#  report.pl pool
+#  report.pl --pool pool
 #
 # Create a text report of the backup status
 
 use POSIX qw(strftime);
 use strict;
 
-my $VERSION = '0.8';
+my $VERSION = '0.13';
 my $pool = 'backup';
 my $max_age_log = 24 * 3600; # seconds how long before ignore log files
 my $max_age_proc = 24 * 3600; # how old before we warn about in progress
@@ -46,36 +46,68 @@ chop($uptime);
 
 my $fail = 0;
 my $warn = 0;
+my @targets = get_targets();
 my @running = report_in_progress();
 my @last_invocation = report_last_invocation();
-my @pool_list = report_pool_list();
-my @pool_status = report_pool_status();
-my @pool_io = report_pool_io();
-my %log_report = report_logs();
-my @df_status = report_df();
-my @snapshot_list = report_snapshots();
-my @summary = make_summary(\@pool_status, \@{$log_report{fails}}, \@df_status, \@running);
+my %logs = report_logs();
+my $pool_exists = verify_pool();
+my @df;
+my @pool_list;
+my @pool_status;
+my @pool_io;
+my @zfs_sizes;
+my @zfs_comp;
+my @snapshots;
+my @summary;
+if ($pool_exists) {
+    @running = report_in_progress();
+    @last_invocation = report_last_invocation();
+    @df = report_df();
+    @pool_list = report_pool_list();
+    @pool_status = report_pool_status();
+    @pool_io = report_pool_io();
+    @zfs_sizes = report_zfs_sizes();
+    @zfs_comp = report_compression();
+    @snapshots = report_snapshots();
+    @summary = make_summary(\@pool_status, \@{$logs{fails}}, \@df, \@running);
+} else {
+    $fail = 1;
+}
 
 if (open(OFILE, ">$tmpfile")) {
+    my $status = ($fail ? 'FAIL' : ($warn ? 'WARN' : 'OK'));
     print OFILE "backup server: $host\n";
-    print OFILE "report date: $ts\n";
+    print OFILE "status: $status\n";
+    print OFILE "pool: $pool";
+    print OFILE " (pool not found)" if ! $pool_exists;
     print OFILE "\n";
-    foreach my $line (@summary) {
-        print OFILE $line;
+    print OFILE "report date: $ts\n";
+    if ($#summary >= 0) {
+        print OFILE "\n";
+        foreach my $line (@summary) {
+            print OFILE $line;
+        }
     }
     print OFILE "\n";
     print OFILE "UPTIME:\n";
     print OFILE "$uptime\n";
-    foreach my $ref (\@pool_list, \@pool_status, \@pool_io, \@df_status, \@{$log_report{output}}, \@last_invocation, \@snapshot_list) {
-        print OFILE "\n";
-        foreach my $line (@{$ref}) {
-            print OFILE $line;
+    print OFILE "\n";
+    print OFILE "TARGETS:\n";
+    foreach my $tgt (@targets) {
+        print OFILE $tgt;
+    }
+    foreach my $ref (\@pool_list, \@zfs_comp, \@zfs_sizes, \@df, \@pool_status, \@pool_io, \@{$logs{output}}, \@last_invocation, \@snapshots) {
+        if ($#{$ref} >= 0) {
+            print OFILE "\n";
+            foreach my $line (@{$ref}) {
+                print OFILE $line;
+            }
         }
     }
     close(OFILE);
     if ($recip ne q()) {
-        my $status = ($fail ? ': FAIL' : ($warn ? ': WARN' : q()));
-        `$mail -s "backup status for ${host}${status}" $recip < $tmpfile`;
+        my $s = ($status eq 'OK') ? q() : ": $status";        
+        `$mail -s "backup status for ${host}${s}" $recip < $tmpfile`;
     } else {
         foreach my $line (`cat $tmpfile`) {
             print $line;
@@ -90,9 +122,26 @@ exit(0);
 
 
 
+sub get_targets {
+    my $tgtfn = "/etc/backup/targets";
+    my @lines;
+    if (open(IFILE, "<$tgtfn")) {
+        while(<IFILE>) {
+            my $line = $_;
+            next if $line =~ /\s*\#/;
+            push @lines, "  $line";
+        }
+        close(IFILE);
+    } else {
+        push @lines, "  cannot read targets: $!\n";
+        $warn = 1;
+    }
+    return @lines;
+}
+
 sub report_in_progress {
     my @lines;
-    my @out = `ls -l /var/run/backup.*.pid`;
+    my @out = `ls -l /var/run/backup.*.pid 2>&1`;
     foreach my $line (@out) {
         chop($line);
         my ($target) = $line =~ /\/var\/run\/backup.(.*).pid$/;
@@ -115,18 +164,42 @@ sub report_last_invocation {
     return @out;
 }
 
+sub verify_pool {
+    my @out = `$zfs list $pool 2>&1`;
+    my $exists = 0;
+    foreach my $line (@out) {
+        $exists = 1 if $line =~ /^$pool/;
+    }
+    return $exists;
+}
+
 sub report_pool_list {
-    my @out = `$zpool list`;
+    my @out = `$zpool list $pool`;
     return @out;
 }
 
 sub report_pool_status {
-    my @out = `$zpool status`;
+    my @out = `$zpool status $pool`;
     return @out;
 }
 
 sub report_pool_io {
-    my @out = `$zpool iostat -v`;
+    my @out = `$zpool iostat -v $pool`;
+    return @out;
+}
+
+sub report_zfs_sizes {
+    my @out = `$zfs list`;
+    my @lines;
+    foreach my $line (@out) {
+        next if $line !~ /NAME/ && $line !~ /^$pool/;
+        push @lines, $line;
+    }
+    return @lines;
+}
+
+sub report_compression {
+    my @out = `$zfs get compression,compressratio $pool`;
     return @out;
 }
 
@@ -164,7 +237,7 @@ sub report_snapshots {
         push @result, "\n";
         push @result, $out[0];
         foreach my $line (sort @out) {
-            push @result, $line if $line =~ /$tgt/;
+            push @result, $line if $line =~ /\/${tgt}\@/;
         }
     }
     return @result;
@@ -185,9 +258,9 @@ sub report_df {
 sub report_logs {
     my @output;
     my $now = time();
-    push @output, "/$pool\n";
+    push @output, "LOGS: /$pool\n";
     my @fails;
-    my @out = `ls -l /$pool`;
+    my @out = `ls -l /$pool 2>&1`;
     foreach my $line (@out) {
         next if $line !~ /.txt$/;
         push @output, $line;
@@ -225,8 +298,29 @@ sub make_summary {
     push @lines, "pool failures:\n";
     foreach my $line (@{$pool_ref}) {
         if ($line =~ /^errors:/) {
-            push @lines, "  $line";
-            $fail = 1 if $line !~ /No known data errors/;
+            if ($line =~ /No known data errors/) {
+                push @lines, "  no known data errors\n";
+            } else {
+                push @lines, "  $line";
+                $fail = 1;
+            }
+        }
+        if ($line =~ /state: (\S+)/) {
+            my $state = $1;
+            if ($state eq 'ONLINE') {
+                # ok
+            } elsif ($state eq 'DEGRADED') {
+                $warn = 1;
+                push @lines, "  pool is in degraded state\n";
+            } else {
+                $fail = 1;
+                push @lines, "  pool is in sub-optimal state: $state\n";
+            }
+        }
+        if ($line =~ /INUSE/) {
+            my ($device) = $line =~ /(\S+)\s+INUSE/;
+            push @lines, "  hot spare in use: $device\n";
+            $warn = 1;
         }
     }
 
@@ -277,7 +371,8 @@ sub make_summary {
             my ($started) = $line =~ /\((\d+)\)/;
             my $age = $now - $started;
             if ($age > $max_age_proc) {
-                $msg .= " WARNING!";
+                my $days = $age / (24 * 3600);
+                $msg .= " WARNING! " . sprintf("%.2f", $days) . " days";
                 $warn = 1;
             }
             push @lines, "  $msg\n";
