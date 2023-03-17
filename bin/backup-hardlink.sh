@@ -146,6 +146,7 @@ do_backup() {
     SRC_PATH=$2
     DST_PATH=$3
     EARGS=""
+    HARGS=""
 
     case "$SRC_ID" in
 	*:*)
@@ -176,16 +177,15 @@ do_backup() {
 	SRC_PATH=/
     fi
 
-    fn=""
-    if [ -f "$CFG_DIR/excludes.$SRC_HOST" ]; then
-	fn="$CFG_DIR/excludes.$SRC_HOST"
-    else
-	if [ -f "$EXCLUDES_FILE" ]; then
-            fn=$EXCLUDES_FILE
-	fi
+    excl_fn=""
+    if [ -f "$EXCLUDES_FILE" ]; then
+        excl_fn=$EXCLUDES_FILE
+	EARGS="--exclude-from=$excl_fn"
     fi
-    if [ "$fn" != "" ]; then
-	EARGS="--exclude-from $fn"
+    excl_fn_host=""
+    if [ -f "$EXCLUDES_FILE.$SRC_HOST" ]; then
+	excl_fn_host="$EXCLUDES_FILE.$SRC_HOST"
+	HARGS="--exclude-from=$excl_fn_host"
     fi
     if [ "$BACKUP_USE_REMOTE_SUDO" != "" ]; then
         RSYNC_PATH="--rsync-path='sudo rsync'"
@@ -198,7 +198,8 @@ do_backup() {
     log "     num=$NUM_SHOTS"
     log "     src=$SRC_USER@$SRC_HOST:$SRC_PATH"
     log "     dst=$DST_PATH"
-    log "    excl=$fn"
+    log "    excl=$excl_fn"
+    log "    excl=$excl_fn_host"
 
     # get the lock or bail out
     get_lock $SRC_HOST
@@ -207,8 +208,13 @@ do_backup() {
     # make a space for the backup
     $DEBUG $MKDIR -p $DST_PATH
 
-    # move aside the oldest snapshot
+    # move aside the oldest snapshot.  fail if oldest exists, since
+    # that probably indicates a failure in previous snapshot.
     if [ -d $DST_PATH/$TYPE.$NUM_SHOTS ]; then
+        if [ -d $DST_PATH/$TYPE.$NUM_SHOTS.oldest ]; then
+            log "  abort: oldest exists at $DST_PATH/$TYPE.oldest"
+            return 1
+        fi
 	log "  move the oldest snapshot"
         $DEBUG $MV $DST_PATH/$TYPE.$NUM_SHOTS $DST_PATH/$TYPE.oldest
     fi
@@ -240,13 +246,13 @@ do_backup() {
     $ECHO $RSYNC -va \
           -e \'ssh -i $BACKUP_KEYFILE\' \
           --rsync-path=\'sudo rsync\' \
-          --delete --delete-excluded $EARGS \
+          --delete --delete-excluded $EARGS $HARGS \
           $RUSER@$RHOST:${SRC_PATH} $DST_PATH/$TYPE.0 \
           > $DST_PATH/$TYPE-cmd.txt
     $DEBUG $RSYNC -va \
            -e "ssh -i $BACKUP_KEYFILE" \
            --rsync-path="sudo rsync" \
-           --delete --delete-excluded $EARGS \
+           --delete --delete-excluded $EARGS $HARGS \
            $RUSER@$RHOST:${SRC_PATH} $DST_PATH/$TYPE.0 \
            > $DST_PATH/$TYPE-log.txt 2> $DST_PATH/$TYPE-err.txt
 
