@@ -1,6 +1,6 @@
 #!/bin/bash
-# rsync-based rolling backup onto zfs
-# Copyright 2006-2017 Matthew Wall, all rights reserved
+# rsync-based rolling backup
+# Copyright 2006-2022 Matthew Wall, all rights reserved
 #
 # usage:
 #
@@ -9,11 +9,94 @@
 # if no target specified, loop through targets in the target file
 #
 # to echo what would happen but do not do it, set DEBUG_BACKUP=1
+#
+# start by doing an rsync to a local directory.  each additional invocation
+# moves the previous set of files aside, does a hard link, then does an rsync.
+# the result is a set of incremental backups with pretty efficient disk use.
+# when a zfs pool is specified, use zfs snapshots on the pool instead of hard
+# links.
+#
+# this script should be run every hour, day, and/or month, depending on how
+# many backups you want.
+#
+# WARNING! this script does nothing to check for remaining disk space!
+
+# this script emits the following:
+#   dst/HOST/daily.0           most recent snapshot
+#   ...
+#   dst/HOST/daily.N           oldest snapshot
+#   dst/HOST/daily-err.txt
+#   dst/HOST/daily-log.txt
+#   dst/HOST/monthly.0
+#   ...
+#   dst/HOST/monthly.N
+#   dst/HOST/monthly-err.txt
+#   dst/HOST/monthly-log.txt
+#
+# this script uses the following configuration files:
+#   etc/targets        - list of hosts and directories to backup
+#   etc/excludes       - global list of files and directories to exclude
+#   etc/excludes.HOST  - things to exclude from the host HOST
+#
+# format of the targets file:
+#   [USER@]SRC_HOST SRC_DIR DST_DIR [user@host:port]
+#   localhost / /backup
+#   admin / /backup
+#   vmhost0.example.com / /backup
+#
+# format of the excludes files is the format understood by rsync.
+
+# revision history:
+#
+# 0.19 29apr22 mwall
+#      re-instated non-zfs backups
+#      new specification for tunnels
+# 0.18 ? mwall
+#      removed wake-on-lan
+#      removed tunnel
+#      implemented zfs snapshots
+#      use /etc/default for configuration
+# 0.14 20jun16 mwall
+#      do not attempt backup if no response from host
+# 0.13 05sep12 mwall
+#      get script to run on asus wireless router with optware
+# 0.12 06nov11
+#      shutdown after wake-on-lan is disabled for now
+#      parameterize the remote config filename
+# 0.11 14may11
+#      added wake-on-lan
+#      default to /cygdrive/c/Users if no config file
+#      improved logging output
+# 0.10 06apr11
+#      use dos2unix to eliminate windows newlines
+# 0.9  23mar11
+#      delete the oldest copy after making the latest sync
+#      added postfix for multiple source directories
+# 0.8  06mar11
+#      added hourly option
+#      consolidated options
+#      consolidated configuration files
+#      enabled use of different usernames on single target
+#      enabled per-target excludes
+#      isolate tunnel parameters
+# 0.7  ?
+#      eliminate need for separate ssh config file when tunneling
+# 0.6  ?
+#      added tunneling
+#      added lock file to eliminate contention on long-lived backups
+# 0.5  06mar06
+#      original implementation
 
 # FIXME: enable tunneling
 # FIXME: enable wake-on-lan
 
-VERSION=0.18
+# TODO: add checks for available disk space
+# TODO: add logic for handling no more disk space
+# TODO: put remote config file handling directly into do_backup
+# TODO: deal with change from src is file to src is dir
+# TODO: remove dependency on dos2unix
+
+VERSION=0.19
 
 TYPE=$1
 TARGET=$2
@@ -21,19 +104,31 @@ TARGET=$2
 BACKUP_CFG_DIR=/opt/backup/etc/backup
 BACKUP_USE_REMOTE_SUDO=
 BACKUP_KEYFILE=
-BACKUP_POOL=backup
 BACKUP_USER=bup
 BACKUP_SRC_DIR=/
 BACKUP_DST_DIR=/backup
 
-TUNNEL_PORT=2222
-TUNNEL_USER=backup
-TUNNEL_HOST=gateway
+# if a pool is specified, then ZFS is enabled.  otherwise, use hard links.
+BACKUP_POOL=
+
+# how many snapshots to keep when using non-zfs
+BACKUP_NUM_SHOTS=
+
+# tunnel parameters
+BACKUP_TUNNEL_PORT=
+BACKUP_TUNNEL_USER=
+BACKUP_TUNNEL_HOST=
+
+# default number of snapshots for hourly, daily, and monthly backups
+NUM_HOURLY_SNAPSHOTS=24
+NUM_DAILY_SNAPSHOTS=30
+NUM_MONTHLY_SNAPSHOTS=3
 
 DATE=date
 ECHO=echo
 HOSTNAME=hostname
 MKDIR=mkdir
+MV=mv
 RM=rm
 RSYNC=rsync
 SSH=ssh
@@ -62,6 +157,21 @@ fi
 BACKUP_HOST=localhost
 if [ -x "$HOSTNAME" ]; then
     BACKUP_HOST=`$HOSTNAME`
+fi
+
+# default to sane values for number of snapshots
+if [ "$NUM_SHOTS" = "" ] ; then
+    case "$TYPE" in
+        monthly)
+            NUM_SHOTS=$NUM_MONTHLY_SNAPSHOTS
+            ;;
+        daily)
+            NUM_SHOTS=$NUM_DAILY_SNAPSHOTS
+            ;;
+        hourly)
+            NUM_SHOTS=$NUM_DAILY_SNAPSHOTS
+            ;;
+    esac
 fi
 
 # emit a message with timestamp prefix
@@ -104,22 +214,14 @@ remove_lock() {
 
 
 # arguments for this function are as follows:
-# do_backup [user@]src_host[:tunnel] [src_dir [dst_dir]]
-#           1                         2        3
+# do_backup [user@]src_host [src_dir [dst_dir]] [user@host:port]
+#           1               2        3          4
 do_backup() {
     SRC_ID=$1
     SRC_DIR=$2
     DST_DIR=$3
-    TUNNEL=""
+    TUNNEL=$4
 
-    case "$SRC_ID" in
-        *:*)
-            SRC_ID=$(echo $SRC_ID | awk -F: '{print $1}')
-            TUNNEL=tunnel
-            ;;
-        *)
-            ;;
-    esac
     case "$SRC_ID" in
         *@*)
             SRC_USER=$(echo $SRC_ID | awk -F@ '{print $1}')
@@ -143,8 +245,10 @@ do_backup() {
     fi
     DST_PATH=$DST_DIR/$SRC_HOST
 
-    if [ "$POOL" = "" ]; then
-        POOL=$BACKUP_POOL
+    if [ "$TUNNEL" = "" ]; then
+        TUNNEL_PORT=$BACKUP_TUNNEL_PORT
+        TUNNEL_USER=$BACKUP_TUNNEL_USER
+        TUNNEL_HOST=$BACKUP_TUNNEL_HOST
     fi
 
     if [ -f "$EXCLUDES_FILE.$SRC_HOST" ]; then
@@ -172,36 +276,66 @@ do_backup() {
     get_lock $SRC_HOST
     if [ "$?" = "1" ]; then return 1; fi
 
-    # ensure that there is a zfs dataset for this target
-    if [ ! -d $DST_PATH ]; then
-        $DEBUG $ZFS create $POOL/$SRC_HOST
-        rc=$?
-        if [ "$rc" != "0" ]; then
-            log "fail: create dataset failed with rc $rc"
-            remove_lock $SRC_HOST
-            return 1
-        fi
-    fi
-
+    RUSER=$SRC_USER
+    RHOST=$SRC_HOST
     TARGS=""
-    if [ "$TUNNEL" = "tunnel" ]; then
+    if [ "$TUNNEL_PORT" != "" -a "$TUNNEL_USER" != "" -a "$TUNNEL_HOST" != "" ]; then
         log "  establishing tunnel"
         TARGS="-e \"$SSH -p $TUNNEL_PORT -o NoHostAuthenticationForLocalhost=yes\""
         $DEBUG $SSH -N -L $TUNNEL_PORT:$SRC_HOST:22 $TUNNEL_USER@$TUNNEL_HOST & tpid=$!
         $DEBUG sleep 30
         RUSER=root
         RHOST=localhost
-    else
-        RUSER=$SRC_USER
-        RHOST=$SRC_HOST
     fi
 
     # see if we can talk to the host
+    TARGET_ALIVE=0
     rc=$($SSH $KEY_ARGS $RUSER@$RHOST date)
     if [ "$rc" = "" ]; then
-        log "no response from $RHOST"
-        COMPLETED=0
+        log "  no access to $RHOST"
     else
+        TARGET_ALIVE=1
+    fi
+
+    if [ "$TARGET_ALIVE" = "1" ]; then
+        if [ "$BACKUP_POOL" != "" ]; then
+            # ensure that there is a zfs dataset for this target
+            if [ ! -d $DST_PATH ]; then
+                $DEBUG $ZFS create $POOL/$SRC_HOST
+                rc=$?
+                if [ "$rc" != "0" ]; then
+                    log "fail: create dataset failed with rc $rc"
+                    remove_lock $SRC_HOST
+                    return 1
+                fi
+            fi
+            SNAP_PATH=$DST_PATH
+        else
+            # make a space for the backup
+            $MKDIR -p $DST_PATH
+            # move aside the oldest snapshot
+            if [ -d $DST_PATH/$TYPE.$NUM_SHOTS ]; then
+                log "  moving the oldest snapshot"
+                $MV $DST_PATH/$TYPE.$NUM_SHOTS $DST_PATH/$TYPE.oldest
+            fi
+            # shift the other snapshots
+            log "  shifting existing snapshots"
+            i=$NUM_SHOTS
+            while [ $i -gt 1 ]; do
+                j=`expr $i - 1`
+                if [ -d $DST_PATH/$TYPE.$j ]; then
+                    $MV $DST_PATH/$TYPE.$j $DST_PATH/$TYPE.$i
+                fi
+                i=`expr $i - 1`
+            done
+            # make a hard-link copy
+            if [ -d $DST_PATH/$TYPE.0 ]; then
+                log "  creating a hard-linked copy"
+                $CP -al $DST_PATH/$TYPE.0 $DST_PATH/$TYPE.1
+            fi
+            SNAP_PATH=$DST_PATH/$TYPE.0
+        fi
+
         logfn=$SRC_HOST-${SRC_PATH_LABEL}-log.txt
         errfn=$SRC_HOST-${SRC_PATH_LABEL}-err.txt
 
@@ -210,37 +344,47 @@ do_backup() {
         fi
 
         log "  synchronizing"
-        if [ "$DEBUG" = "echo" ]; then
-            log "$RSYNC -av $RSYNC_KEYFILE $RSYNC_PATH --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $DST_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn"
+        if [ "$DEBUG" != "" ]; then
+            log "$RSYNC -av $RSYNC_KEYFILE $RSYNC_PATH --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn"
         else
-#            $RSYNC -av $RSYNC_KEYFILE $RSYNC_PATH --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $DST_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
+            #            $RSYNC -av $RSYNC_KEYFILE $RSYNC_PATH --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
             if [ "$BACKUP_USE_REMOTE_SUDO" != "" ]; then
-                $RSYNC -av -e "ssh -i $BACKUP_KEYFILE" --rsync-path='sudo rsync' --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $DST_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
+                $RSYNC -av -e "ssh -i $BACKUP_KEYFILE" --rsync-path='sudo rsync' --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
             else
-                $RSYNC -av -e "ssh -i $BACKUP_KEYFILE" --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $DST_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
+                $RSYNC -av -e "ssh -i $BACKUP_KEYFILE" --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
             fi
             RETVAL=$?
         fi
 
-        $DEBUG cp -p $DST_DIR/$logfn $DST_PATH/$logfn
-        $DEBUG cp -p $DST_DIR/$errfn $DST_PATH/$errfn
+        $DEBUG cp -p $DST_DIR/$logfn $SNAP_PATH/$logfn
+        $DEBUG cp -p $DST_DIR/$errfn $SNAP_PATH/$errfn
 
         if [ "$RETVAL" = "0" ]; then
             COMPLETED=1
         else
             log "  sync failed with return code $RETVAL"
         fi
-    fi
 
-    if [ "$tpid" != "" ]; then
-        log "  shutting down tunnel with pid $tpid"
-        $DEBUG kill $tpid
+        if [ "$tpid" != "" ]; then
+            log "  shutting down tunnel with pid $tpid"
+            $DEBUG kill $tpid
+        fi
     fi
 
     if [ "$COMPLETED" = "1" ]; then
-        BUPTS=$($DATE +"%Y%m%d%H%M%S")
-        log "  creating snapshot $BUPTS"
-        $DEBUG $ZFS snapshot $POOL/$SRC_HOST@$BUPTS
+        if [ "$BACKUP_POOL" != "" ]; then
+            BUPTS=$($DATE +"%Y%m%d%H%M%S")
+            log "  creating snapshot $BUPTS"
+            $DEBUG $ZFS snapshot $POOL/$SRC_HOST@$BUPTS
+        else
+            # put timestamp on the latest
+            $TOUCH $DST_PATH/$TYPE.0
+            # delete oldest snapshot
+            if [ -d $DST_PATH/$TYPE.oldest ]; then
+                log "  deleting oldest snapshot"
+                $RM -rf $DST_PATH/$TYPE.oldest
+            fi
+        fi
     fi
 
     remove_lock $SRC_HOST
