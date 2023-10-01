@@ -252,12 +252,12 @@ do_backup() {
     fi
 
     if [ -f "$EXCLUDES_FILE.$SRC_HOST" ]; then
-        EXCLUDES="$EXCLUDES_FILE.$SRC_HOST"
-    elif [ -f "$EXCLUDES_FILE" ]; then
-        EXCLUDES=$EXCLUDES_FILE
+        HEXC_FILE="$EXCLUDES_FILE.$SRC_HOST"
+        HEXC_ARGS="--exclude-from=$EXCLUDES_FILE.$SRC_HOST"
     fi
-    if [ "$EXCLUDES" != "" ]; then
-        EXC_ARGS="--exclude-from=$EXCLUDES"
+    if [ -f "$EXCLUDES_FILE" ]; then
+        EXC_FILE="$EXCLUDES_FILE"
+        EXC_ARGS="--exclude-from=$EXCLUDES_FILE"
     fi
     if [ "$BACKUP_USE_REMOTE_SUDO" != "" ]; then
         RSYNC_PATH="--rsync-path='sudo rsync'"
@@ -269,7 +269,8 @@ do_backup() {
     log "$TYPE backup of $SRC_HOST"
     log "    src=$SRC_USER@$SRC_HOST:$SRC_PATH"
     log "    dst=$DST_PATH"
-    log "   excl=$EXCLUDES"
+    log "   excl=$EXC_FILE"
+    log "  hexcl=$HEXC_FILE"
     log "    tun=$TUNNEL"
 
     # get the lock or bail out
@@ -301,7 +302,7 @@ do_backup() {
         if [ "$BACKUP_POOL" != "" ]; then
             # ensure that there is a zfs dataset for this target
             if [ ! -d $DST_PATH ]; then
-                $DEBUG $ZFS create $POOL/$SRC_HOST
+                $DEBUG $ZFS create $BACKUP_POOL/$SRC_HOST
                 rc=$?
                 if [ "$rc" != "0" ]; then
                     log "fail: create dataset failed with rc $rc"
@@ -345,13 +346,13 @@ do_backup() {
 
         log "  synchronizing"
         if [ "$DEBUG" != "" ]; then
-            log "$RSYNC -av $RSYNC_KEYFILE $RSYNC_PATH --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn"
+            log "$RSYNC -av $RSYNC_KEYFILE $RSYNC_PATH --delete --delete-excluded $EXC_ARGS $HEXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn"
         else
             #            $RSYNC -av $RSYNC_KEYFILE $RSYNC_PATH --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
             if [ "$BACKUP_USE_REMOTE_SUDO" != "" ]; then
-                $RSYNC -av -e "ssh -i $BACKUP_KEYFILE" --rsync-path='sudo rsync' --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
+                $RSYNC -av -e "ssh -i $BACKUP_KEYFILE" --rsync-path='sudo rsync' --delete --delete-excluded $EXC_ARGS $HEXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
             else
-                $RSYNC -av -e "ssh -i $BACKUP_KEYFILE" --delete --delete-excluded $EXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
+                $RSYNC -av -e "ssh -i $BACKUP_KEYFILE" --delete --delete-excluded $EXC_ARGS $HEXC_ARGS $RUSER@$RHOST:$SRC_PATH $SNAP_PATH > $DST_DIR/$logfn 2> $DST_DIR/$errfn
             fi
             RETVAL=$?
         fi
@@ -375,7 +376,7 @@ do_backup() {
         if [ "$BACKUP_POOL" != "" ]; then
             BUPTS=$($DATE +"%Y%m%d%H%M%S")
             log "  creating snapshot $BUPTS"
-            $DEBUG $ZFS snapshot $POOL/$SRC_HOST@$BUPTS
+            $DEBUG $ZFS snapshot $BACKUP_POOL/$SRC_HOST@$BUPTS
         else
             # put timestamp on the latest
             $TOUCH $DST_PATH/$TYPE.0
