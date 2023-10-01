@@ -96,7 +96,7 @@
 # TODO: deal with change from src is file to src is dir
 # TODO: remove dependency on dos2unix
 
-VERSION=0.19
+VERSION=0.20
 
 TYPE=$1
 TARGET=$2
